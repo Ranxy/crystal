@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 )
 
 var (
@@ -33,29 +34,46 @@ func StartProxy(listen string) {
 }
 
 func handleAgentConn(agentConn net.Conn) {
+	defer agentConn.Close() // Ensure agentConn is closed when the function exits
+
 	port, err := portAllocator.GetAvailablePort()
 	if err != nil {
 		log.Println(err)
-		agentConn.Close()
 		return
 	}
+	defer portAllocator.ReleasePort(port) // Release port when the function exits
+
 	conn := NewConnection(agentConn)
 	portToConnection[port] = conn
+	defer delete(portToConnection, port) // Remove from map when the function exits
+
 	log.Printf("Start Agent From %s and forward to %d", agentConn.RemoteAddr(), port)
+
 	extListener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
 		log.Println(err)
-		agentConn.Close()
-		portAllocator.ReleasePort(port)
 		return
 	}
+	defer extListener.Close() // Ensure listener is closed when the function exits
 
-	go handleExternalConnections(extListener, conn)
-	go forwardAgentToExternal(conn)
-	agentConn.Close()
-	extListener.Close()
-	portAllocator.ReleasePort(port)
-	delete(portToConnection, port)
+	var wg sync.WaitGroup
+
+	// Handle external connections
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		handleExternalConnections(extListener, conn)
+	}()
+
+	// Forward data from agent to external connections
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		forwardAgentToExternal(conn)
+	}()
+
+	// Wait for all goroutines to finish
+	wg.Wait()
 }
 
 func handleExternalConnections(listener net.Listener, conn *Connection) {
@@ -71,30 +89,29 @@ func handleExternalConnections(listener net.Listener, conn *Connection) {
 }
 
 func forwardExternalToAgent(extConn net.Conn, agentConn net.Conn) {
+	defer extConn.Close()
 	buf := make([]byte, 1024)
 	for {
 		n, err := extConn.Read(buf)
 		if err != nil {
 			log.Println(err)
-			extConn.Close()
 			break
 		}
 		_, err = agentConn.Write(buf[:n])
 		if err != nil {
 			log.Println(err)
-			agentConn.Close()
 			break
 		}
 	}
 }
 
 func forwardAgentToExternal(conn *Connection) {
+	defer conn.Close()
 	buf := make([]byte, 1024)
 	for {
 		n, err := conn.AgentConn.Read(buf)
 		if err != nil {
 			log.Println(err)
-			conn.Close()
 			break
 		}
 		conn.mutex.Lock()
