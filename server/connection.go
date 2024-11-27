@@ -9,12 +9,14 @@ type Connection struct {
 	AgentConn     net.Conn
 	ExternalConns map[net.Conn]bool
 	mutex         sync.Mutex
+	closeChan     chan struct{} // 新增关闭通道
 }
 
 func NewConnection(agentConn net.Conn) *Connection {
 	return &Connection{
 		AgentConn:     agentConn,
 		ExternalConns: make(map[net.Conn]bool),
+		closeChan:     make(chan struct{}),
 	}
 }
 
@@ -37,5 +39,5 @@ func (c *Connection) Close() {
 	for conn := range c.ExternalConns {
 		conn.Close()
 	}
-	c.ExternalConns = make(map[net.Conn]bool)
+	close(c.closeChan)
 }

@@ -56,27 +56,43 @@ func handleAgentConn(agentConn net.Conn) {
 	}
 	defer extListener.Close() // Ensure listener is closed when the function exits
 
+	quitChan := make(chan struct{})
+
 	var wg sync.WaitGroup
 
 	// Handle external connections
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		handleExternalConnections(extListener, conn)
+		handleExternalConnections(extListener, conn, quitChan)
 	}()
 
 	// Forward data from agent to external connections
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		forwardAgentToExternal(conn)
+		forwardAgentToExternal(conn, quitChan)
 	}()
 
 	// Wait for all goroutines to finish
 	wg.Wait()
 }
 
-func handleExternalConnections(listener net.Listener, conn *Connection) {
+func handleExternalConnections(listener net.Listener, conn *Connection, quitChan chan struct{}) {
+
+	go func() {
+		select {
+		case <-quitChan:
+			log.Println("Agent external quit")
+			listener.Close()
+			return
+		case <-conn.closeChan:
+			log.Println("handle external conn close")
+			listener.Close()
+			return
+		}
+	}()
+
 	for {
 		extConn, err := listener.Accept()
 		if err != nil {
@@ -85,6 +101,7 @@ func handleExternalConnections(listener net.Listener, conn *Connection) {
 		}
 		conn.AddExternalConn(extConn)
 		go forwardExternalToAgent(extConn, conn.AgentConn)
+
 	}
 }
 
@@ -94,31 +111,32 @@ func forwardExternalToAgent(extConn net.Conn, agentConn net.Conn) {
 	for {
 		n, err := extConn.Read(buf)
 		if err != nil {
-			log.Println(err)
+			log.Println("reader ext conn: ", err)
 			break
 		}
 		_, err = agentConn.Write(buf[:n])
 		if err != nil {
-			log.Println(err)
+			log.Println("write agent conn: ", err)
 			break
 		}
 	}
 }
 
-func forwardAgentToExternal(conn *Connection) {
+func forwardAgentToExternal(conn *Connection, quitChan chan struct{}) {
 	defer conn.Close()
 	buf := make([]byte, 1024)
 	for {
 		n, err := conn.AgentConn.Read(buf)
 		if err != nil {
-			log.Println(err)
+			log.Println("reade agent conn: ", err)
+			close(quitChan)
 			break
 		}
 		conn.mutex.Lock()
 		for extConn := range conn.ExternalConns {
 			_, err := extConn.Write(buf[:n])
 			if err != nil {
-				log.Println(err)
+				log.Println("write ext conn: ", err)
 				conn.RemoveExternalConn(extConn)
 				extConn.Close()
 			}
