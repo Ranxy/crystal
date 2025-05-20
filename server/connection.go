@@ -33,11 +33,11 @@ func (c *Connection) RemoveExternalConn(extConn net.Conn) {
 }
 
 func (c *Connection) Close() {
-	c.AgentConn.Close()
+	handleNetCloseError(c.AgentConn)
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	for conn := range c.ExternalConns {
-		conn.Close()
+		handleNetCloseError(conn)
 	}
 	close(c.closeChan)
 }

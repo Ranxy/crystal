@@ -37,7 +37,7 @@ func (pa *PortAllocator) GetAvailablePort() (int, error) {
 			}
 			// bind success and use this port
 			pa.used[port] = true
-			ln.Close()
+			handleNetCloseError(ln)
 			log.Printf("Allocated port %d\n", port)
 			return port, nil
 		}

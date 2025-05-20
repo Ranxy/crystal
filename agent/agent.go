@@ -85,13 +85,13 @@ func Start(connAAddr string, connBAddr string) error {
 
 	connA, err := dial(connAAddr)
 	if err != nil {
-		return fmt.Errorf("Failed to connect to connA: %w", err)
+		return fmt.Errorf("failed to connect to connA: %w", err)
 	}
 	defer connA.Close()
 
 	connB, err := dial(connBAddr)
 	if err != nil {
-		return fmt.Errorf("Failed to connect to connB: %w", err)
+		return fmt.Errorf("failed to connect to connB: %w", err)
 	}
 	defer connB.Close()
 

@@ -2,50 +2,61 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
 )
 
-var (
+type Server struct {
+	listener         net.Listener
 	portToConnection map[int]*Connection
 	portAllocator    *PortAllocator
-)
-
-func init() {
-	portToConnection = make(map[int]*Connection)
-	portAllocator = NewPortAllocator(9000, 10000)
 }
 
-func StartProxy(listen string) {
+func NewServer(listen string) *Server {
 	listener, err := net.Listen("tcp", listen)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer listener.Close()
+
+	s := &Server{
+		listener:         listener,
+		portToConnection: make(map[int]*Connection),
+		portAllocator:    NewPortAllocator(9000, 10000),
+	}
+	return s
+}
+
+func (s *Server) Close() {
+	log.Println("start close server!")
+	handleNetCloseError(s.listener)
+}
+
+func (s *Server) StartProxy() {
 	for {
-		conn, err := listener.Accept()
+		conn, err := s.listener.Accept()
 		if err != nil {
 			log.Println(err)
 			continue
 		}
-		go handleAgentConn(conn)
+		go s.handleAgentConn(conn)
 	}
 }
 
-func handleAgentConn(agentConn net.Conn) {
-	defer agentConn.Close() // Ensure agentConn is closed when the function exits
+func (s *Server) handleAgentConn(agentConn net.Conn) {
+	defer handleNetCloseError(agentConn) // Ensure agentConn is closed when the function exits
 
-	port, err := portAllocator.GetAvailablePort()
+	port, err := s.portAllocator.GetAvailablePort()
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	defer portAllocator.ReleasePort(port) // Release port when the function exits
+	defer s.portAllocator.ReleasePort(port) // Release port when the function exits
 
 	conn := NewConnection(agentConn)
-	portToConnection[port] = conn
-	defer delete(portToConnection, port) // Remove from map when the function exits
+	s.portToConnection[port] = conn
+	defer delete(s.portToConnection, port) // Remove from map when the function exits
 
 	log.Printf("Start Agent From %s and forward to %d", agentConn.RemoteAddr(), port)
 
@@ -54,7 +65,7 @@ func handleAgentConn(agentConn net.Conn) {
 		log.Println(err)
 		return
 	}
-	defer extListener.Close() // Ensure listener is closed when the function exits
+	defer handleNetCloseError(extListener) // Ensure listener is closed when the function exits
 
 	quitChan := make(chan struct{})
 
@@ -84,11 +95,11 @@ func handleExternalConnections(listener net.Listener, conn *Connection, quitChan
 		select {
 		case <-quitChan:
 			log.Println("Agent external quit")
-			listener.Close()
+			handleNetCloseError(listener)
 			return
 		case <-conn.closeChan:
 			log.Println("handle external conn close")
-			listener.Close()
+			handleNetCloseError(listener)
 			return
 		}
 	}()
@@ -106,7 +117,7 @@ func handleExternalConnections(listener net.Listener, conn *Connection, quitChan
 }
 
 func forwardExternalToAgent(extConn net.Conn, agentConn net.Conn) {
-	defer extConn.Close()
+	defer handleNetCloseError(extConn)
 	buf := make([]byte, 1024)
 	for {
 		n, err := extConn.Read(buf)
@@ -138,9 +149,16 @@ func forwardAgentToExternal(conn *Connection, quitChan chan struct{}) {
 			if err != nil {
 				log.Println("write ext conn: ", err)
 				conn.RemoveExternalConn(extConn)
-				extConn.Close()
+				handleNetCloseError(extConn)
 			}
 		}
 		conn.mutex.Unlock()
+	}
+}
+
+func handleNetCloseError(c io.Closer) {
+	err := c.Close()
+	if err != nil {
+		log.Printf("closed with error %s\n", err.Error())
 	}
 }
