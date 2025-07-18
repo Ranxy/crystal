@@ -2,12 +2,14 @@ package agent
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -45,83 +47,66 @@ func dial(address string) (net.Conn, error) {
 	}
 }
 
-func forward(src, dst net.Conn, shutdownChan chan struct{}, quitChan chan struct{}) {
+// forward copies data from src to dst and signals completion via the WaitGroup.
+func forward(dst, src net.Conn, wg *sync.WaitGroup) {
+	defer wg.Done()
+	// Closing the destination connection when copying is done or fails.
+	// This is important to unblock the other forwarder.
 	defer dst.Close()
-	dataChan := make(chan []byte)
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := src.Read(buf)
-			if err != nil {
-				log.Println("Read from src failed:", err)
-				close(dataChan)
-				return
-			}
-			dataChan <- buf[:n]
-		}
-	}()
-	for {
-		select {
-		case <-shutdownChan:
-			log.Println("Shutting down forwarding from src to dst")
-			return
-		case data, ok := <-dataChan:
-			if !ok {
-				log.Println("Source connection closed")
-				quitChan <- struct{}{}
-				return
-			}
-			_, err := dst.Write(data)
-			if err != nil {
-				log.Println("Write to dst failed:", err)
-				quitChan <- struct{}{}
-				return
-			}
+	if _, err := io.Copy(dst, src); err != nil {
+		// We expect an error when the connection is closed, so we only log unexpected errors.
+		if !strings.Contains(err.Error(), "use of closed network connection") && err != io.EOF {
+			log.Printf("Forwarding error: %v", err)
 		}
 	}
 }
 
 func Start(connAAddr string, connBAddr string) error {
-
 	connA, err := dial(connAAddr)
 	if err != nil {
 		return fmt.Errorf("failed to connect to connA: %w", err)
 	}
-	defer connA.Close()
 
 	connB, err := dial(connBAddr)
 	if err != nil {
+		connA.Close() // Clean up connA if connB fails
 		return fmt.Errorf("failed to connect to connB: %w", err)
 	}
-	defer connB.Close()
 
-	// control channel
-	shutdownChan := make(chan struct{})
-	quitChan := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// sig process
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// Goroutine to copy from A (server) to B (internal service)
+	go forward(connB, connA, &wg)
+
+	// Goroutine to copy from B (internal service) to A (server)
+	go forward(connA, connB, &wg)
+
+	// Goroutine to wait for both forwarders to finish and then close a channel.
+	done := make(chan struct{})
 	go func() {
-		<-sigChan
-		log.Println("Received shutdown signal")
-		close(shutdownChan)
+		wg.Wait()
+		close(done)
 	}()
 
-	go forward(connA, connB, shutdownChan, quitChan)
-	go forward(connB, connA, shutdownChan, quitChan)
+	// Handle OS signals for graceful shutdown.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// wait quit or shutdown
-	for i := 0; i < 2; i++ {
-		select {
-		case <-quitChan:
-			log.Println("A forwarding goroutine exited, initiating shutdown...")
-			close(shutdownChan)
-		case <-shutdownChan:
-			log.Println("Shutting down on user request...")
-		}
+	// Block until either both forwarders are done, or an OS signal is received.
+	select {
+	case <-done:
+		log.Println("Connections closed normally.")
+	case <-sigChan:
+		log.Println("Received shutdown signal. Closing connections.")
+		// Gracefully close connections. This will cause the `io.Copy` in `forward`
+		// to return, which will in turn lead to the WaitGroup counter decreasing.
+		connA.Close()
+		connB.Close()
+		// Wait for the 'done' signal to ensure cleanup is complete.
+		<-done
 	}
 
-	log.Println("All done.")
+	log.Println("Agent shut down.")
 	return nil
 }
