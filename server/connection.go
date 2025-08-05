@@ -9,7 +9,8 @@ type Connection struct {
 	AgentConn     net.Conn
 	ExternalConns map[net.Conn]bool
 	mutex         sync.Mutex
-	closeChan     chan struct{} // 新增关闭通道
+	closeOnce     sync.Once     // Ensures the connection is closed only once
+	closeChan     chan struct{} // Channel to signal connection closure
 }
 
 func NewConnection(agentConn net.Conn) *Connection {
@@ -32,12 +33,22 @@ func (c *Connection) RemoveExternalConn(extConn net.Conn) {
 	delete(c.ExternalConns, extConn)
 }
 
+// Close gracefully closes the agent connection and all associated external connections.
+// It uses sync.Once to ensure that the closing logic is executed only once,
+// preventing panics from multiple goroutines trying to close the same resources.
 func (c *Connection) Close() {
-	c.AgentConn.Close()
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	for conn := range c.ExternalConns {
-		conn.Close()
-	}
-	close(c.closeChan)
+	c.closeOnce.Do(func() {
+		// First, close the agent connection. This will unblock any pending I/O.
+		handleNetCloseError(c.AgentConn)
+
+		// Then, close all external connections.
+		c.mutex.Lock()
+		for conn := range c.ExternalConns {
+			handleNetCloseError(conn)
+		}
+		c.mutex.Unlock()
+
+		// Finally, close the channel to signal that the connection is fully torn down.
+		close(c.closeChan)
+	})
 }

@@ -16,5 +16,8 @@ func main() {
 		log.Fatal("listen parameters are required")
 	}
 
-	server.StartProxy(listen)
+	s := server.NewServer(listen)
+	log.Printf("Server started on %s\n", listen)
+	s.StartProxy()
+	s.Close()
 }
