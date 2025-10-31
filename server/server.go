@@ -38,6 +38,11 @@ func (s *Server) StartProxy() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
+			// Check if this error is due to the listener being closed
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				log.Println("Listener closed. Stopping proxy.")
+				return
+			}
 			log.Println(err)
 			continue
 		}
