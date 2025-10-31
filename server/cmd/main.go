@@ -3,6 +3,9 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Ranxy/crystal/server"
 )
@@ -18,6 +21,17 @@ func main() {
 
 	s := server.NewServer(listen)
 	log.Printf("Server started on %s\n", listen)
-	s.StartProxy()
+
+	// Handle OS signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start proxy in a goroutine
+	go s.StartProxy()
+
+	// Wait for shutdown signal
+	<-sigChan
+	log.Println("Received shutdown signal. Closing server.")
 	s.Close()
+	log.Println("Server shut down.")
 }
